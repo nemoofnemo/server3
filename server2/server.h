@@ -5,6 +5,7 @@
 #include "cmdFlag.h"
 #define BUF_SIZE 1024000
 #define v_type(X,Y) pair<pair<string,string>,pair<string,string>>((X),(Y))
+#include <Python\Python.h>
 
 class transferModule{
 private:
@@ -161,12 +162,70 @@ public:
 	}
 };
 
-/**********************************************************************************/
+bool callPy( bool flag , int arg1 , int arg2 , double arg3 , int * a , int * b , double * c ){
+	Py_Initialize();
+	PyObject * pModule = NULL;
+	PyObject * pFunc = NULL; 
+	PyObject * pRet = NULL;
+	PyObject * ptr = NULL;
+	
+	pModule =PyImport_ImportModule("readMac");
+	if( pModule == NULL ){
+		Log("[python]:importModule error\n");
+		return false;
+	}
+	
+	pFunc= PyObject_GetAttrString(pModule, "split");
+	if( pFunc == NULL ){
+		Log("[python]:getAttrString error\n");
+		return false;
+	}
+
+	PyObject *pArgs = PyTuple_New(3);
+	PyTuple_SetItem( pArgs , 0 , Py_BuildValue("i", arg1) );
+	PyTuple_SetItem( pArgs , 1 , Py_BuildValue("i", arg2) );
+	PyTuple_SetItem( pArgs , 2 , Py_BuildValue("d", arg3) );
+
+	//call
+	if(flag == true ){
+		pRet = PyEval_CallObject(pFunc, pArgs);
+		* a = -1;
+		* b = -1;
+		* c = -1.0;
+		Py_Finalize();
+		return true;
+	}
+	else{
+		pRet = PyEval_CallObject(pFunc, NULL);
+	}
+
+	ptr = PyList_GET_ITEM( pRet , 0);
+	PyArg_Parse(ptr , "i" , a);
+
+	ptr = PyList_GET_ITEM( pRet , 1);
+	PyArg_Parse( ptr , "i" , b);
+	
+	ptr = PyList_GET_ITEM( pRet , 2);
+	PyArg_Parse( ptr , "d" , c);
+	Log("[python]:location=%d,%d,%lf\n" , *a,*b,*c );
+
+	Py_Finalize();
+	return true;
+}
+
+char * stData;
+int stLength;
+CRITICAL_SECTION stcs;
+
 //全局变量taksManager，负责管理任务
 TaskManager taskManager;	//warning:one program,one Taskmanager Obeject!!!
 transferModule listener;
+
 vector< pair<pair<string,string>,pair<string,string> > > mac_ip;
 CRITICAL_SECTION mics;
+
+vector<vector<string> > mac_key;
+CRITICAL_SECTION mkcs;
 
 unsigned int __stdcall taskThread( LPVOID lpArg ){
 	char * data = (char*)lpArg;
@@ -180,13 +239,27 @@ unsigned int __stdcall taskThread( LPVOID lpArg ){
 	string taskIP( data + length , data + length + 16 );
 	string targetMac;
 	string wardMac;
-	string targetIP;
-	string wardIP;
+	string key;
+	string targetIP("192.168.23.3");
+	string wardIP("192.168.23.3");
+	data[length] = '\0';
+	FILE * fp;
+	//python return
+	int a = 0;
+	int b = 0;
+	double c = 0;
+	char str[128];
+	int t_l  = 0;
 
 	if( data != NULL){
 		dataSection += 32;
 		dataSectionLen = length - 32;
 	}
+
+	vector<string> r_vec;
+	int r_temp = -1;
+	char r_flag = -1;
+	bool r_run = false;
 
 	int loc = -1;
 	int pos = -1;
@@ -205,6 +278,8 @@ unsigned int __stdcall taskThread( LPVOID lpArg ){
 
 	EnterCriticalSection( &mics );
 	if( loc == 1 ){
+		targetMac = mac_ip[pos].second.first;
+		targetIP = mac_ip[pos].second.second;
 		wardMac = taskMac;
 		wardIP = taskIP;
 		if( mac_ip[pos].first.second != taskIP ){
@@ -213,40 +288,66 @@ unsigned int __stdcall taskThread( LPVOID lpArg ){
 	}else if(loc == 2){
 		targetMac = taskMac;
 		targetIP = taskIP;
+		wardMac = mac_ip[pos].first.first;
+		wardIP = mac_ip[pos].first.second ;
 		if( mac_ip[pos].second.second != taskIP ){
 			mac_ip[pos].second.second = taskIP;
 		}
 	}
 	LeaveCriticalSection( &mics );
 
-	Log("[server]:task thread.\n");
+	Log("[server]:task thread start,cmd=%c.\n",cmdFlag);
 	switch(cmdFlag){
 	case TAKEPIC:
-		listener.sendDataToListener( data , length , targetIP  ,6002);
+		if( pos != -1  && targetIP != "NULL")
+			listener.sendDataToListener( data , length , targetIP  ,6002);
 		break;
 	case SENDPIC:
-		listener.sendDataToListener( data , length , wardIP , 6002 );
+		if( pos != -1 && wardIP != "NULL" )
+			listener.sendDataToListener( data , length , wardIP , 6002 );
 		break;
 	case GETLOCATION:
-		if( length == 32 )
-			listener.sendDataToListener( data , length , wardIP , 6002 );
-		else if( length > 32 ){
-			///
+		if( length == 32 && targetIP != "NULL")
+			if( pos != -1)
+				listener.sendDataToListener( data , length , targetIP , 6002 );
+		break;
+	case SENDLOCATION:
+		if( pos != -1 ){
+			EnterCriticalSection( &stcs );
+			
+			if( (fp = fopen("String.txt" , "w+" )) != NULL ) {
+				fprintf( fp , "%s" , dataSection );
+				fclose(fp);
+				stLength = 0;
+				//call python
+				if( callPy( false , 0 , 0 , 0 , &a , &b , &c ) ){
+					sprintf( str , "B0%08d%12s0000000000%d %d %lf" , 0 , wardMac.c_str() , a , b , c );
+					t_l = strlen( str );
+					sprintf( stData , "%8d" , t_l );
+					memcpy( str + 2 , stData , 8 );
+					listener.sendDataToListener( str , t_l , wardIP , 6002 );
+				}
+			}
+			LeaveCriticalSection( &stcs );
 		}
 		break;
 	case WIFI_SIG:
-		if( length == 32 ){
-			listener.sendDataToListener( data , length , targetIP , 6002 );
-		}
-		else if( length > 32 ){
-			//get wifi
+		if( stLength > 12 * BUF_SIZE )
+			stLength = 0;
+
+		 if( length > 32 ){//need test
+			//get wifi.write data to stdata and modify stLength
+			//enter cs
+			EnterCriticalSection( &stcs );
+			Log( "[server]" );
+			Log( dataSection );
+			memcpy( stData + stLength , dataSection , dataSectionLen );
+			stLength += dataSectionLen;
+			LeaveCriticalSection( &stcs );
 		}
 		break;
 	case GPS_SIG:
 		listener.sendDataToListener( data , length , targetIP , 6002 );
-		break;
-	case SENDLOCATION:
-		//
 		break;
 	case SRV_QUIT://debug
 		Log("[server]:quit.\n");
@@ -254,34 +355,81 @@ unsigned int __stdcall taskThread( LPVOID lpArg ){
 		break;
 	case DUMP:
 		Log("[server]:dump.\n");
-		/*for( int i = 0 ; i < dataSectionLen ; ++ i ){
+		for( int i = 0 ; i < dataSectionLen ; ++ i ){
 			putchar(*(dataSection + i ));
 		}
-		putchar('\n');*/
+		putchar('\n');
 		++ log_dump;
 		break;
 	case REGISTER:
-		EnterCriticalSection( &mics );
-		targetMac = string(dataSection , dataSection + 12);
-		if( pos == - 1 ){
-			mac_ip.push_back( 
-				pair<pair<string,string>,pair<string,string>>
-					(pair<string,string>(taskMac,taskIP),pair<string,string>(targetMac,"NULL")) );
+		if( length == 32 ){
+			/*if( pos != -1 ){
+				if( loc == 1 ){
+					mac_ip[pos].first.second = taskIP;
+				}
+				else if( loc == 2 ){
+					mac_ip[pos].second.second = taskIP;
+				}
+			}*/
 		}
-		EnterCriticalSection( &mics );
+		else{
+			r_flag = * dataSection;
+			key = string( dataSection + 1 , dataSection + dataSectionLen );
+			for( int i = 0 ; i < mac_key.size() ; ++ i ){
+				if( mac_key[i][0] == taskMac ){//mac
+					EnterCriticalSection( & mkcs );
+					mac_key[i][1] = key;//key
+					mac_key[i][2] = r_flag;//flag:0 ward,1 target
+					mac_key[i][3] = taskIP;//last ip
+					r_run = true;
+					LeaveCriticalSection ( & mkcs );
+					break;
+				}
+
+				if( mac_key[i][1] == key ){
+					r_temp = i;
+					break;
+				}
+			}
+
+			EnterCriticalSection( & mkcs );
+			if( r_temp != -1 ){
+				if( mac_key[r_temp][2].c_str()[0] != r_flag ){
+					EnterCriticalSection( &mics );
+					if( r_flag == '0' ){
+						mac_ip.push_back(v_type((pair<string,string>(taskMac,taskIP)),(pair<string,string>(mac_key[r_temp][0],mac_key[r_temp][3]))));
+					}
+					else if(r_flag == '1'){
+						mac_ip.push_back(v_type((pair<string,string>(mac_key[r_temp][0],mac_key[r_temp][3])),(pair<string,string>(taskMac,taskIP))));
+					}
+					LeaveCriticalSection ( &mics );
+				}
+			}
+			else if(r_run == false){//==-1
+				r_vec.push_back( taskMac );
+				r_vec.push_back( key );
+				r_vec.push_back( string( dataSection , dataSection + 1 ));
+				r_vec.push_back( taskIP );
+				mac_key.push_back( r_vec );
+			}
+			LeaveCriticalSection( &mkcs );
+		}
 		break;
 	default:
 		Log("[server]:Invalid CMD flag = %x\n",cmdFlag);
 		log_invalid ++;
 		//return error message
+		for( int i = 0 ; i < dataSectionLen ; ++ i ){
+			putchar(*(dataSection + i ));
+		}
 
+		putchar('\n');
 		break;
 	}
 
 	free( data );
 	++ log_use;
-	Log("[server]:connection=%d,recv=%d,throw=%d,use=%d,dump=%d,invalid=%d\n" , log_connect , log_recv , log_throw , log_use , log_dump,log_invalid);
-	
+	Log("[server]:connection=%d,recv=%d,throw=%d,use=%d,dump=%d,invalid=%d\n" , log_connect , log_recv , log_throw , log_use , log_dump,log_invalid);	
 
 	return 0;
 }
@@ -322,7 +470,7 @@ unsigned int __stdcall listenThread( LPVOID lpArg ){
 	int opt=1;
 	setsockopt(sockSrv,SOL_SOCKET,SO_REUSEADDR,(char *)&opt,sizeof(opt));
 	bind( sockSrv , (SOCKADDR*)&addrSrv, sizeof(SOCKADDR));
-	listen( sockSrv , 512);
+	listen( sockSrv , 128);
 
 	while( true ){
 		sockClient = accept(sockSrv, (SOCKADDR*)&addrClient, &len);
@@ -350,13 +498,10 @@ unsigned int __stdcall listenThread( LPVOID lpArg ){
 			free(buffer);
 			++ log_recv;
 			Log("[server]:listen thread=%d,recv data = %d\n" , arg ,count);
-			/*for( int i = 0 ; i < count ; ++ i ){
-				putchar(data[i] );
-			}
-			*/
 
 			if( count < 32 || listener.checkLength(data,count) == false){
 				closesocket( sockClient );
+				Log("[server]:length error\n");
 				continue;
 			}
 
